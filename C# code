@@ -1,0 +1,204 @@
+using System;
+using System.Windows;
+using System.Windows.Controls;
+using System.IO.Ports;
+using System.Globalization;
+using System.IO;
+using System.Data.SQLite;
+using System.Windows.Media;
+
+namespace ArduinoUNO_v1
+{
+    public partial class MainWindow : Window
+    {   
+        SerialPort sp = new SerialPort();
+        string[] ports = SerialPort.GetPortNames();
+
+        float tempAmbient = 0, tempObject = 0;
+        int nDataForAvg = 0, maxDataForAvg = 5;
+        
+        public MainWindow()
+        {
+            InitializeComponent();
+            COM.ItemsSource = ports;
+            sp.DataReceived += new SerialDataReceivedEventHandler(DataReceived);
+        }
+
+        private void COM_SelectionChanged(object sender, SelectionChangedEventArgs e)
+        {
+            try
+            {
+                if (sp.IsOpen) sp.Close();
+                sp.PortName = COM.SelectedItem as string;
+                sp.BaudRate = 9600;
+                sp.Open();
+            }
+            catch(Exception ex)
+            {
+                MessageBox.Show(ex.Message);
+            }
+        }
+
+        private void DataReceived(object sender, SerialDataReceivedEventArgs e)
+        {
+            Dispatcher.Invoke(() => {
+                string[] data = sp.ReadExisting().Split(' ');
+
+                tempAmbient = float.Parse(data[0], CultureInfo.InvariantCulture.NumberFormat);
+                tempObject = float.Parse(data[1], CultureInfo.InvariantCulture.NumberFormat);
+                
+                InsertTemperatureData(tempAmbient, tempObject);
+                
+                nDataForAvg++;
+                if (nDataForAvg == maxDataForAvg) 
+                {
+                    nDataForAvg = 0;
+                    AverageTemperature(maxDataForAvg);
+                }
+            });
+        }
+
+        private void InsertTemperatureData(double tempAmbient, double tempObject)
+        {
+            string dbPath = @"C:\Programs\Kurs4Sem\database\temps.db";
+
+            try
+            {
+                using (var connection = new SQLiteConnection($"Data Source={dbPath}"))
+                {
+                    connection.Open();
+
+                    const string tableName = "myTable";
+                    using (var createTableCommand = new SQLiteCommand(connection))
+                    {
+                        createTableCommand.CommandText = $@"
+                        CREATE TABLE IF NOT EXISTS {tableName} 
+                        (
+                            tempAmbient REAL NOT NULL,
+                            tempObject REAL NOT NULL,
+                            timeMoment DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP
+                        )";
+                        createTableCommand.ExecuteNonQuery();
+                    }
+
+                    using (var insertCommand = new SQLiteCommand(connection))
+                    {
+                        insertCommand.CommandText = $@"
+                        INSERT INTO {tableName} (tempAmbient, tempObject)
+                        VALUES (@tempAmbient, @tempObject)";
+
+                        insertCommand.Parameters.AddWithValue("@tempAmbient", tempAmbient);
+                        insertCommand.Parameters.AddWithValue("@tempObject", tempObject);
+
+                        int rowsAffected = insertCommand.ExecuteNonQuery();
+
+                        if (rowsAffected == 0)
+                        {
+                            throw new Exception("Couldn't insert data");
+                        }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Console.WriteLine($"Error in working with the database: {ex.Message}");
+                throw;
+            }
+        }
+
+        private void AverageTemperature(int amountData, bool output = false)
+        {
+            string dbPath = @"C:\Programs\Kurs4Sem\database\temps.db";
+            using (var connection = new SQLiteConnection($"Data Source={dbPath}"))
+            {
+                connection.Open();
+
+                string tableName = "myTable";
+                
+                var selectCommand = connection.CreateCommand();
+                selectCommand.CommandText = $@"
+                SELECT * FROM {tableName} 
+                ORDER BY timeMoment DESC
+                LIMIT {amountData}";
+                
+                float sumAmb = 0, sumObj = 0;
+                string timeMoment = "";
+                using (var reader = selectCommand.ExecuteReader())
+                {
+                    while (reader.Read())
+                    {
+                        sumAmb += reader.GetFloat(0);
+                        sumObj += reader.GetFloat(1);
+                        timeMoment = reader.GetString(2);
+                    }
+                }
+                
+                sumAmb /= amountData;
+                sumObj /= amountData;
+                
+                string avg = timeMoment + "\nT_Ambient = " + sumAmb.ToString() +
+                                          "\nT_Object = " + sumObj.ToString();
+                
+                if (output) TextIn.Text = avg;
+                SaveDataInFile(avg);
+            }
+        } 
+
+        private void SaveDataInFile(string str) {
+            string path = "C:\\Programs\\Kurs4Sem\\database\\Test_appNET";
+
+            bool saveFile = true;
+            using (StreamWriter outputFile = new StreamWriter(Path.Combine(path, "WriteLines.txt"), saveFile))
+            {
+                outputFile.WriteLine(str);
+            }
+        }
+
+        bool stop = false;
+
+        private void ChangeState(object sender, RoutedEventArgs e)
+        {
+            Button tb = e.Source as Button;
+            
+            if (stop) 
+            {
+                sp.Write("On");
+                TextIn.Text = "Writing is enabled";
+                
+                stop = false;
+                
+                tb.Background = Brushes.LimeGreen;
+            }
+            else 
+            {
+                sp.Write("Off");
+                TextIn.Text = "Writing is disabled";
+                
+                stop = true;
+                
+                tb.Background = Brushes.Red;
+            }
+        }
+
+        private void Button_Turn_On(object sender, RoutedEventArgs e)
+        {
+            ChangeState(sender, e);
+        }
+
+        private void Button_Change_Amount_Data(object sender, RoutedEventArgs e)
+        {
+            bool output = true;
+            if (!string.IsNullOrEmpty(TextOut.GetLineText(0)))
+            {
+                int amountData = int.Parse(TextOut.GetLineText(0));
+                if (amountData > 0) AverageTemperature(amountData, output);
+            }
+        }
+
+        private void Button_Average_Temps(object sender, RoutedEventArgs e)
+        {
+            bool output = true;
+            AverageTemperature(maxDataForAvg, output);
+        }
+    }
+}
